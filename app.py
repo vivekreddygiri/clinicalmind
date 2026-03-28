@@ -164,21 +164,20 @@ if not show_results:
         """)
 
 else:
-    subject_id = active_patient
+    subject_id        = active_patient
     selected_symptoms = active_symptoms
 
-    # Load everything
-    with st.spinner("Loading patient data..."):
-        try:
-            models, feature_cols = load_models()
-            (base_df, lab_df, rx_df,
-             icd_hist_df, feature_matrix,
-             noteevents, prescriptions,
-             admissions_lean, labevents_hadm,
-             prescriptions_hadm, diagnoses_hadm) = load_outputs()
-        except Exception as e:
-            st.error(f"Failed to load outputs: {e}")
-            st.stop()
+    # ── Always load models and data (cached — instant) ────────
+    try:
+        models, feature_cols = load_models()
+        (base_df, lab_df, rx_df,
+         icd_hist_df, feature_matrix,
+         noteevents, prescriptions,
+         admissions_lean, labevents_hadm,
+         prescriptions_hadm, diagnoses_hadm) = load_outputs()
+    except Exception as e:
+        st.error(f"Failed to load outputs: {e}")
+        st.stop()
 
     # Check patient exists
     patient_row = feature_matrix[feature_matrix["SUBJECT_ID"] == subject_id]
@@ -186,69 +185,96 @@ else:
         st.error(f"Patient ID {subject_id} not found in the dataset.")
         st.stop()
 
-    # ── Build Summary ─────────────────────────────────────────
-    with st.spinner("Generating clinical summary..."):
-        base_row  = base_df[base_df["SUBJECT_ID"] == subject_id]
-        lab_row   = lab_df[lab_df["SUBJECT_ID"] == subject_id]
-        icd_row   = icd_hist_df[icd_hist_df["SUBJECT_ID"] == subject_id]
-        rx_row    = prescriptions[prescriptions["SUBJECT_ID"] == subject_id]
+    # ── Only recompute when analyze button was clicked ─────────
+    # Use a cache key combining patient_id + symptoms
+    cache_key = f"{subject_id}_{'_'.join(sorted(active_symptoms))}"
+    needs_recompute = (
+        analyze_btn or
+        "cached_summary" not in st.session_state
+    )
 
-        diag_hist = icd_row["DIAGNOSIS_HISTORY"].values[0] if len(icd_row) else []
-        rx_list   = rx_row["DRUG"].dropna().unique().tolist() if len(rx_row) else []
+    if needs_recompute:
+        # ── Build Summary ──────────────────────────────────────
+        with st.spinner("Generating clinical summary..."):
+            base_row = base_df[base_df["SUBJECT_ID"] == subject_id]
+            lab_row  = lab_df[lab_df["SUBJECT_ID"] == subject_id]
+            icd_row  = icd_hist_df[icd_hist_df["SUBJECT_ID"] == subject_id]
+            rx_row   = prescriptions[prescriptions["SUBJECT_ID"] == subject_id]
 
-        lab_means = {}
-        if len(lab_row):
-            mean_cols = [c for c in lab_row.columns if "_MEAN" in c]
-            for col in mean_cols:
-                lab_means[col.replace("_MEAN", "")] = lab_row[col].values[0]
+            diag_hist = icd_row["DIAGNOSIS_HISTORY"].values[0] if len(icd_row) else []
+            rx_list   = rx_row["DRUG"].dropna().unique().tolist() if len(rx_row) else []
 
-        age    = base_row["AGE"].values[0]    if len(base_row) else 0
-        gender = base_row["GENDER"].values[0] if len(base_row) else 0
-        n_adm  = base_row["NUM_ADMISSIONS"].values[0] if len(base_row) else 0
-        los    = base_row["AVG_LOS"].values[0]        if len(base_row) else 0
+            lab_means = {}
+            if len(lab_row):
+                mean_cols = [c for c in lab_row.columns if "_MEAN" in c]
+                for col in mean_cols:
+                    lab_means[col.replace("_MEAN", "")] = lab_row[col].values[0]
 
-        summary = build_clinical_summary(
-            subject_id        = subject_id,
-            noteevents_df     = noteevents,
-            diagnosis_history = diag_hist,
-            prescription_list = rx_list,
-            lab_summary       = lab_means,
-            num_admissions    = n_adm,
-            avg_los           = los,
-            age               = age,
-            gender            = gender
-        )
+            age    = base_row["AGE"].values[0]    if len(base_row) else 0
+            gender = base_row["GENDER"].values[0] if len(base_row) else 0
+            n_adm  = base_row["NUM_ADMISSIONS"].values[0] if len(base_row) else 0
+            los    = base_row["AVG_LOS"].values[0]        if len(base_row) else 0
 
-    # ── Predict Risk ──────────────────────────────────────────
-    with st.spinner("Running risk prediction models..."):
-        patient_features = patient_row.iloc[0].to_dict()
-        patient_features.pop("SUBJECT_ID", None)
-        raw_risk_scores = predict_patient_risk(patient_features, models, feature_cols)
-
-        # Apply symptom adjustment on top of model scores
-        from modules.risk_model import apply_symptom_adjustment
-        risk_scores = apply_symptom_adjustment(raw_risk_scores, selected_symptoms)
-
-    # ── Explain ───────────────────────────────────────────────
-    with st.spinner("Computing SHAP explanations..."):
-        aligned_row = patient_row.copy()
-        for col in feature_cols:
-            if col not in aligned_row.columns:
-                aligned_row[col] = 0
-        aligned_row = aligned_row[feature_cols]
-
-        explanations = {}
-        for target, model in models.items():
-            shap_feats = get_top_shap_features(
-                model, aligned_row, feature_cols
+            summary = build_clinical_summary(
+                subject_id        = subject_id,
+                noteevents_df     = noteevents,
+                diagnosis_history = diag_hist,
+                prescription_list = rx_list,
+                lab_summary       = lab_means,
+                num_admissions    = n_adm,
+                avg_los           = los,
+                age               = age,
+                gender            = gender
             )
-            nl_exp = shap_to_natural_language(
-                shap_feats, TARGET_NAMES[target]
+            st.session_state["cached_summary"] = summary
+
+        # ── Predict Risk ───────────────────────────────────────
+        with st.spinner("Running risk prediction models..."):
+            from modules.risk_model import SYMPTOM_FEATURE_MAP
+
+            patient_features = patient_row.iloc[0].to_dict()
+            patient_features.pop("SUBJECT_ID", None)
+
+            for symptom_label in active_symptoms:
+                feature_col = SYMPTOM_FEATURE_MAP.get(symptom_label)
+                if feature_col and feature_col in patient_features:
+                    patient_features[feature_col] = 1.0
+
+            risk_scores = predict_patient_risk(
+                patient_features, models, feature_cols
             )
-            explanations[target] = {
-                "shap_features":  shap_feats,
-                "nl_explanation": nl_exp
-            }
+            st.session_state["cached_risk_scores"] = risk_scores
+
+        # ── Explain ────────────────────────────────────────────
+        with st.spinner("Computing SHAP explanations..."):
+            aligned_row = patient_row.copy()
+            for col in feature_cols:
+                if col not in aligned_row.columns:
+                    aligned_row[col] = 0
+            aligned_row = aligned_row[feature_cols]
+
+            explanations = {}
+            for target, model in models.items():
+                shap_feats = get_top_shap_features(
+                    model, aligned_row, feature_cols
+                )
+                nl_exp = shap_to_natural_language(
+                    shap_feats, TARGET_NAMES[target]
+                )
+                explanations[target] = {
+                    "shap_features":  shap_feats,
+                    "nl_explanation": nl_exp
+                }
+            st.session_state["cached_explanations"] = explanations
+
+        # Save cache key so next rerun knows not to recompute
+        st.session_state["last_cache_key"] = cache_key
+
+    else:
+        # ── Load from cache — instant, no recompute ────────────
+        summary      = st.session_state["cached_summary"]
+        risk_scores  = st.session_state["cached_risk_scores"]
+        explanations = st.session_state["cached_explanations"]
 
     # ════════════════════════════════════════════════════════
     # TAB LAYOUT
@@ -393,7 +419,6 @@ else:
         recs = generate_recommendations(risk_scores)
         for rec in recs:
             st.warning(rec)
-
     # ── Tab 3: Explainability ─────────────────────────────────
     with tab3:
         st.markdown(

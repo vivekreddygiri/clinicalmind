@@ -108,18 +108,85 @@ def extract_diagnosis_flags(diagnoses_df):
     return all_codes
 
 
-def build_feature_matrix(base_df, lab_df, rx_df, diag_flag_df):
+def build_feature_matrix(base_df, lab_df, rx_df, diag_flag_df,
+                         symptom_df=None):
     matrix = base_df.copy()
-    matrix = matrix.merge(lab_df,      on="SUBJECT_ID", how="left")
-    matrix = matrix.merge(rx_df,       on="SUBJECT_ID", how="left")
-    matrix = matrix.merge(diag_flag_df,on="SUBJECT_ID", how="left")
+    matrix = matrix.merge(lab_df,       on="SUBJECT_ID", how="left")
+    matrix = matrix.merge(rx_df,        on="SUBJECT_ID", how="left")
+    matrix = matrix.merge(diag_flag_df, on="SUBJECT_ID", how="left")
+
+    # Merge symptom features if provided
+    if symptom_df is not None:
+        matrix = matrix.merge(symptom_df, on="SUBJECT_ID", how="left")
+        # Fill missing symptom flags with 0
+        symptom_cols = [c for c in symptom_df.columns if c != "SUBJECT_ID"]
+        matrix[symptom_cols] = matrix[symptom_cols].fillna(0)
 
     # Encode gender
     matrix["GENDER"] = (matrix["GENDER"] == "M").astype(int)
 
-    # Fill missing lab values with median
+    # Fill missing numeric values with median
     num_cols = matrix.select_dtypes(include=[np.number]).columns
     matrix[num_cols] = matrix[num_cols].fillna(matrix[num_cols].median())
 
     print(f"Feature matrix shape: {matrix.shape}")
     return matrix
+
+# ── Symptom ICD-9 Code Mapping ────────────────────────────────
+SYMPTOM_ICD9_MAP = {
+    "SYMPTOM_FATIGUE":            ["78079", "7807", "7800"],
+    "SYMPTOM_FREQUENT_URINATION": ["78841", "78842", "78843"],
+    "SYMPTOM_EXCESSIVE_THIRST":   ["7835"],
+    "SYMPTOM_CHEST_PAIN":         ["78650", "78651", "78652", "78659", "7865"],
+    "SYMPTOM_SHORTNESS_BREATH":   ["78605", "78609", "7860"],
+    "SYMPTOM_SWOLLEN_LEGS":       ["7823"],
+    "SYMPTOM_BLURRED_VISION":     ["3688", "3689", "3680"],
+    "SYMPTOM_NAUSEA":             ["78702", "78701", "7870"],
+    "SYMPTOM_DECREASED_URINE":    ["7885"],
+    "SYMPTOM_WEIGHT_GAIN":        ["7831"],
+    "SYMPTOM_DIZZINESS":          ["7804"],
+    "SYMPTOM_PALPITATIONS":       ["7851"],
+}
+
+
+def extract_symptom_features(diagnoses_df):
+    """
+    Extract symptom presence per patient using ICD-9 symptom codes (780-799).
+    Returns binary flags — 1 if patient ever had this symptom coded, 0 otherwise.
+    This replaces manual symptom weights with data-driven learned weights.
+    """
+    diag = diagnoses_df.copy()
+    diag.columns = diag.columns.str.upper()
+
+    # Clean ICD-9 codes — remove dots for matching
+    diag["ICD9_CLEAN"] = (
+        diag["ICD9_CODE"]
+        .astype(str)
+        .str.strip()
+        .str.replace(".", "", regex=False)
+        .str.upper()
+    )
+
+    # Aggregate all codes per patient
+    all_codes = diag.groupby("SUBJECT_ID")["ICD9_CLEAN"].apply(
+        lambda x: " ".join(x.tolist())
+    ).reset_index()
+    all_codes.columns = ["SUBJECT_ID", "ALL_CODES"]
+
+    # Binary flag per symptom
+    for symptom_flag, icd_codes in SYMPTOM_ICD9_MAP.items():
+        all_codes[symptom_flag] = all_codes["ALL_CODES"].apply(
+            lambda text: int(any(code in text for code in icd_codes))
+        )
+
+    result = all_codes.drop(columns=["ALL_CODES"])
+
+    # Print symptom prevalence
+    print("Symptom feature prevalence:")
+    for col in result.columns:
+        if col.startswith("SYMPTOM_"):
+            count = result[col].sum()
+            pct   = count / len(result) * 100
+            print(f"  {col:<35}: {count:>6} patients ({pct:.1f}%)")
+
+    return result

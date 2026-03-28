@@ -9,6 +9,7 @@ from modules.label_engine       import (generate_labels,
 from modules.feature_engineer   import (extract_lab_features,
                                         extract_prescription_features,
                                         extract_diagnosis_flags,
+                                        extract_symptom_features,
                                         build_feature_matrix)
 from modules.risk_model         import train_all_models
 
@@ -44,9 +45,14 @@ rx_df        = extract_prescription_features(prescriptions)
 print("\n[6/7] Extracting diagnosis flags...")
 diag_flag_df = extract_diagnosis_flags(diagnoses)
 
+print("\n[6.5/7] Extracting symptom features from ICD-9 codes...")
+symptom_df = extract_symptom_features(diagnoses)
+
 # ── Step 5: Build full feature matrix ─────────────────────────
 print("\n[7/7] Building feature matrix...")
-feature_matrix = build_feature_matrix(base_df, lab_df, rx_df, diag_flag_df)
+feature_matrix = build_feature_matrix(
+    base_df, lab_df, rx_df, diag_flag_df, symptom_df
+)
 
 # Merge labels into feature matrix
 full_df = feature_matrix.merge(labels_df, on="SUBJECT_ID", how="inner")
@@ -64,6 +70,7 @@ lab_df.to_pickle("outputs/lab_df.pkl")
 rx_df.to_pickle("outputs/rx_df.pkl")
 icd_hist_df.to_pickle("outputs/icd_hist_df.pkl")
 feature_matrix.to_pickle("outputs/feature_matrix.pkl")
+symptom_df.to_pickle("outputs/symptom_df.pkl")
 full_df.to_pickle("outputs/full_df.pkl")
 
 # Save noteevents lean version (only needed columns to save RAM)

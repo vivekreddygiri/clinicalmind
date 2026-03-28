@@ -63,7 +63,6 @@ def train_all_models(feature_matrix_with_labels):
             subsample         = 0.8,
             colsample_bytree  = 0.8,
             scale_pos_weight  = scale_pos_weight,
-            use_label_encoder = False,
             eval_metric       = "auc",
             random_state      = 42,
             n_jobs            = -1,
@@ -151,92 +150,19 @@ def risk_level(prob):
     else:
         return "LOW", "🟢"
 
-# Symptom to disease relevance mapping
-# Values represent how much each symptom nudges each disease risk
-SYMPTOM_WEIGHTS = {
-    "Fatigue": {
-        "LABEL_DIABETES":  0.08,
-        "LABEL_CKD":       0.06,
-        "LABEL_HEARTFAIL": 0.07
-    },
-    "Frequent Urination": {
-        "LABEL_DIABETES":  0.15,
-        "LABEL_CKD":       0.10,
-        "LABEL_HEARTFAIL": 0.02
-    },
-    "Excessive Thirst": {
-        "LABEL_DIABETES":  0.15,
-        "LABEL_CKD":       0.05,
-        "LABEL_HEARTFAIL": 0.01
-    },
-    "Chest Pain": {
-        "LABEL_DIABETES":  0.03,
-        "LABEL_CKD":       0.02,
-        "LABEL_HEARTFAIL": 0.15
-    },
-    "Shortness of Breath": {
-        "LABEL_DIABETES":  0.02,
-        "LABEL_CKD":       0.05,
-        "LABEL_HEARTFAIL": 0.18
-    },
-    "Swollen Legs": {
-        "LABEL_DIABETES":  0.01,
-        "LABEL_CKD":       0.08,
-        "LABEL_HEARTFAIL": 0.15
-    },
-    "Blurred Vision": {
-        "LABEL_DIABETES":  0.12,
-        "LABEL_CKD":       0.04,
-        "LABEL_HEARTFAIL": 0.01
-    },
-    "Nausea": {
-        "LABEL_DIABETES":  0.04,
-        "LABEL_CKD":       0.08,
-        "LABEL_HEARTFAIL": 0.04
-    },
-    "Decreased Urine Output": {
-        "LABEL_DIABETES":  0.03,
-        "LABEL_CKD":       0.18,
-        "LABEL_HEARTFAIL": 0.08
-    },
-    "Rapid Weight Gain": {
-        "LABEL_DIABETES":  0.02,
-        "LABEL_CKD":       0.06,
-        "LABEL_HEARTFAIL": 0.14
-    },
-    "Dizziness": {
-        "LABEL_DIABETES":  0.05,
-        "LABEL_CKD":       0.04,
-        "LABEL_HEARTFAIL": 0.07
-    },
-    "Palpitations": {
-        "LABEL_DIABETES":  0.02,
-        "LABEL_CKD":       0.02,
-        "LABEL_HEARTFAIL": 0.12
-    },
+# Symptom name to feature column mapping
+# Used in app.py to set symptom flags before prediction
+SYMPTOM_FEATURE_MAP = {
+    "Fatigue":               "SYMPTOM_FATIGUE",
+    "Frequent Urination":    "SYMPTOM_FREQUENT_URINATION",
+    "Excessive Thirst":      "SYMPTOM_EXCESSIVE_THIRST",
+    "Chest Pain":            "SYMPTOM_CHEST_PAIN",
+    "Shortness of Breath":   "SYMPTOM_SHORTNESS_BREATH",
+    "Swollen Legs":          "SYMPTOM_SWOLLEN_LEGS",
+    "Blurred Vision":        "SYMPTOM_BLURRED_VISION",
+    "Nausea":                "SYMPTOM_NAUSEA",
+    "Decreased Urine Output":"SYMPTOM_DECREASED_URINE",
+    "Rapid Weight Gain":     "SYMPTOM_WEIGHT_GAIN",
+    "Dizziness":             "SYMPTOM_DIZZINESS",
+    "Palpitations":          "SYMPTOM_PALPITATIONS",
 }
-
-
-def apply_symptom_adjustment(risk_scores, selected_symptoms):
-    """
-    Adjust raw model risk scores based on current symptoms.
-    Uses a capped additive approach so scores stay within [0, 1].
-    """
-    if not selected_symptoms:
-        return risk_scores  # No symptoms = no change
-
-    adjusted = {}
-    for target, base_prob in risk_scores.items():
-        total_boost = 0.0
-        for symptom in selected_symptoms:
-            if symptom in SYMPTOM_WEIGHTS:
-                total_boost += SYMPTOM_WEIGHTS[symptom].get(target, 0.0)
-
-        # Cap total boost at 0.35 so symptoms alone can't push to 100%
-        total_boost = min(total_boost, 0.35)
-
-        # Weighted blend: 70% model history + 30% symptom signal
-        new_prob = base_prob + (1 - base_prob) * total_boost
-        adjusted[target] = round(min(float(new_prob), 0.99), 4)
-
-    return adjusted
