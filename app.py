@@ -7,7 +7,8 @@ import plotly.graph_objects as go
 from modules.risk_model       import load_all_models, predict_patient_risk, risk_level, TARGET_NAMES
 from modules.summarizer       import build_clinical_summary, format_summary_text
 from modules.explainer        import explain_patient, get_top_shap_features, shap_to_natural_language
-from modules.report_generator import build_full_report, save_report
+from modules.report_generator    import build_full_report, save_report
+from modules.longitudinal_engine import compute_longitudinal_risk
 
 # ── Page Config ───────────────────────────────────────────────
 st.set_page_config(
@@ -51,14 +52,20 @@ def load_models():
 
 @st.cache_data
 def load_outputs():
-    base_df        = pd.read_pickle("outputs/base_df.pkl")
-    lab_df         = pd.read_pickle("outputs/lab_df.pkl")
-    rx_df          = pd.read_pickle("outputs/rx_df.pkl")
-    icd_hist_df    = pd.read_pickle("outputs/icd_hist_df.pkl")
-    feature_matrix = pd.read_pickle("outputs/feature_matrix.pkl")
-    noteevents     = pd.read_pickle("outputs/noteevents_lean.pkl")
-    prescriptions  = pd.read_pickle("outputs/prescriptions_lean.pkl")
-    return base_df, lab_df, rx_df, icd_hist_df, feature_matrix, noteevents, prescriptions
+    base_df            = pd.read_pickle("outputs/base_df.pkl")
+    lab_df             = pd.read_pickle("outputs/lab_df.pkl")
+    rx_df              = pd.read_pickle("outputs/rx_df.pkl")
+    icd_hist_df        = pd.read_pickle("outputs/icd_hist_df.pkl")
+    feature_matrix     = pd.read_pickle("outputs/feature_matrix.pkl")
+    noteevents         = pd.read_pickle("outputs/noteevents_lean.pkl")
+    prescriptions      = pd.read_pickle("outputs/prescriptions_lean.pkl")
+    admissions_lean    = pd.read_pickle("outputs/admissions_lean.pkl")
+    labevents_hadm     = pd.read_pickle("outputs/labevents_hadm.pkl")
+    prescriptions_hadm = pd.read_pickle("outputs/prescriptions_hadm.pkl")
+    diagnoses_hadm     = pd.read_pickle("outputs/diagnoses_hadm.pkl")
+    return (base_df, lab_df, rx_df, icd_hist_df, feature_matrix,
+            noteevents, prescriptions, admissions_lean,
+            labevents_hadm, prescriptions_hadm, diagnoses_hadm)
 
 # ── Sidebar ───────────────────────────────────────────────────
 with st.sidebar:
@@ -166,7 +173,9 @@ else:
             models, feature_cols = load_models()
             (base_df, lab_df, rx_df,
              icd_hist_df, feature_matrix,
-             noteevents, prescriptions) = load_outputs()
+             noteevents, prescriptions,
+             admissions_lean, labevents_hadm,
+             prescriptions_hadm, diagnoses_hadm) = load_outputs()
         except Exception as e:
             st.error(f"Failed to load outputs: {e}")
             st.stop()
@@ -244,11 +253,12 @@ else:
     # ════════════════════════════════════════════════════════
     # TAB LAYOUT
     # ════════════════════════════════════════════════════════
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📋 Clinical Summary",
         "🔬 Risk Profile",
         "💡 Explainability",
-        "📄 Full Report"
+        "📄 Full Report",
+        "📈 Longitudinal Trend"
     ])
 
     # ── Tab 1: Clinical Summary ───────────────────────────────
@@ -462,3 +472,183 @@ else:
             file_name= f"clinicalmind_patient_{subject_id}.txt",
             mime     = "text/plain"
         )
+
+    # ── Tab 5: Longitudinal Risk Trend ────────────────────────
+    with tab5:
+        st.markdown(
+            "<div class='section-header'>Risk Trend Across Admissions Over Time</div>",
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            "This chart shows how the patient's chronic disease risk evolved "
+            "across each hospital admission over time. An upward trend indicates "
+            "deteriorating clinical profile. A downward trend indicates improvement.",
+        )
+
+        with st.spinner("Computing per-admission risk scores..."):
+            longitudinal_df = compute_longitudinal_risk(
+                subject_id         = subject_id,
+                models             = models,
+                feature_cols       = feature_cols,
+                admissions_lean    = admissions_lean,
+                labevents_hadm     = labevents_hadm,
+                prescriptions_hadm = prescriptions_hadm,
+                diagnoses_hadm     = diagnoses_hadm,
+                base_df            = base_df,
+            )
+
+        if longitudinal_df.empty:
+            st.warning("No admission data found for longitudinal analysis.")
+        else:
+            n_admissions = len(longitudinal_df)
+            st.caption(
+                f"Patient {subject_id} — {n_admissions} admission(s) found"
+            )
+
+            # ── Line chart ─────────────────────────────────────
+            disease_colors = {
+                "LABEL_DIABETES":  "#4f8ef7",
+                "LABEL_CKD":       "#f7a14f",
+                "LABEL_HEARTFAIL": "#ff4b4b",
+            }
+
+            fig = go.Figure()
+
+            for target, color in disease_colors.items():
+                if target not in longitudinal_df.columns:
+                    continue
+                name = TARGET_NAMES[target]
+
+                # X axis — use admission number if dates are missing
+                if longitudinal_df["ADMITTIME"].isnull().all():
+                    x_vals   = longitudinal_df["ADMISSION_NUM"]
+                    x_label  = "Admission Number"
+                else:
+                    x_vals  = longitudinal_df["ADMITTIME"].dt.strftime("%Y-%m")
+                    x_label = "Admission Month"
+
+                fig.add_trace(go.Scatter(
+                    x          = x_vals,
+                    y          = longitudinal_df[target],
+                    mode       = "lines+markers",
+                    name       = name,
+                    line       = dict(color=color, width=2.5),
+                    marker     = dict(size=8, symbol="circle"),
+                    hovertemplate = (
+                        f"<b>{name}</b><br>"
+                        "Admission: %{x}<br>"
+                        "Risk: %{y:.1f}%<extra></extra>"
+                    )
+                ))
+
+            # Risk zone shading
+            fig.add_hrect(y0=70, y1=100, fillcolor="#ff4b4b",
+                          opacity=0.08, line_width=0,
+                          annotation_text="HIGH RISK ZONE",
+                          annotation_position="top right",
+                          annotation_font_color="#ff4b4b",
+                          annotation_font_size=9)
+            fig.add_hrect(y0=45, y1=70, fillcolor="#ffa500",
+                          opacity=0.07, line_width=0,
+                          annotation_text="MODERATE RISK ZONE",
+                          annotation_position="top right",
+                          annotation_font_color="#ffa500",
+                          annotation_font_size=9)
+            fig.add_hrect(y0=25, y1=45, fillcolor="#ffd700",
+                          opacity=0.06, line_width=0)
+
+            fig.update_layout(
+                xaxis_title   = x_label,
+                yaxis_title   = "Risk Score (%)",
+                yaxis         = dict(range=[0, 105]),
+                paper_bgcolor = "rgba(0,0,0,0)",
+                plot_bgcolor  = "rgba(15,17,23,0.6)",
+                font_color    = "#ffffff",
+                height        = 450,
+                legend        = dict(
+                    bgcolor       = "#252b3b",
+                    font          = dict(color="white"),
+                    orientation   = "h",
+                    yanchor       = "bottom",
+                    y             = 1.02,
+                    xanchor       = "right",
+                    x             = 1
+                ),
+                hovermode     = "x unified",
+                margin        = dict(l=20, r=20, t=60, b=40)
+            )
+            fig.update_xaxes(
+                gridcolor="#2d3448", showgrid=True,
+                tickfont=dict(color="#9ca3af")
+            )
+            fig.update_yaxes(
+                gridcolor="#2d3448", showgrid=True,
+                tickfont=dict(color="#9ca3af"),
+                ticksuffix="%"
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ── Per admission table ────────────────────────────
+            st.subheader("📊 Per-Admission Risk Breakdown")
+            display_df = longitudinal_df.copy()
+
+            if not display_df["ADMITTIME"].isnull().all():
+                display_df["Admission Date"] = pd.to_datetime(
+                    display_df["ADMITTIME"]
+                ).dt.strftime("%Y-%m-%d")
+            else:
+                display_df["Admission Date"] = display_df["ADMISSION_NUM"].apply(
+                    lambda x: f"Admission {x}"
+                )
+
+            display_df = display_df.rename(columns={
+                "LABEL_DIABETES":  "Diabetes Risk %",
+                "LABEL_CKD":       "CKD Risk %",
+                "LABEL_HEARTFAIL": "Heart Failure Risk %",
+            })
+
+            cols_to_show = ["Admission Date",
+                            "Diabetes Risk %",
+                            "CKD Risk %",
+                            "Heart Failure Risk %"]
+            cols_to_show = [c for c in cols_to_show
+                            if c in display_df.columns]
+
+            st.dataframe(
+                display_df[cols_to_show].style.format(
+                    {c: "{:.1f}%" for c in cols_to_show
+                     if "Risk" in c}
+                ).background_gradient(
+                    subset=[c for c in cols_to_show if "Risk" in c],
+                    cmap="RdYlGn_r", vmin=0, vmax=100
+                ),
+                use_container_width=True
+            )
+
+            # ── Trend summary ──────────────────────────────────
+            if n_admissions >= 2:
+                st.subheader("📉 Trend Analysis")
+                cols = st.columns(3)
+                targets_list = [
+                    ("LABEL_DIABETES",  "Diabetes",     cols[0]),
+                    ("LABEL_CKD",       "CKD",          cols[1]),
+                    ("LABEL_HEARTFAIL", "Heart Failure", cols[2]),
+                ]
+                for target, short_name, col in targets_list:
+                    if target not in longitudinal_df.columns:
+                        continue
+                    first = longitudinal_df[target].iloc[0]
+                    last  = longitudinal_df[target].iloc[-1]
+                    delta = last - first
+                    arrow = "↑ Worsening" if delta > 5 else (
+                            "↓ Improving" if delta < -5 else "→ Stable")
+                    color = "inverse" if delta > 5 else (
+                            "normal"  if delta < -5 else "off")
+                    col.metric(
+                        label = short_name,
+                        value = f"{last:.1f}%",
+                        delta = f"{delta:+.1f}% from first admission",
+                        delta_color = color
+                    )

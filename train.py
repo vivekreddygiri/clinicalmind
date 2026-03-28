@@ -79,6 +79,60 @@ prescriptions_lean = prescriptions[
 prescriptions_lean.columns = prescriptions_lean.columns.str.upper()
 prescriptions_lean.to_pickle("outputs/prescriptions_lean.pkl")
 
+# ── Save additional data for longitudinal analysis ────────────
+print("Saving longitudinal data...")
+
+# Admissions with dates — needed for timeline
+admissions.columns = admissions.columns.str.upper()
+admissions_lean = admissions[
+    ["SUBJECT_ID", "HADM_ID", "ADMITTIME", "DISCHTIME", "ADMISSION_TYPE"]
+].copy()
+admissions_lean["ADMITTIME"] = pd.to_datetime(
+    admissions_lean["ADMITTIME"], errors="coerce"
+)
+admissions_lean.to_pickle("outputs/admissions_lean.pkl")
+
+# Lab events per admission — filter to only key labs to save space
+labevents.columns = labevents.columns.str.upper()
+KEY_LAB_IDS = [
+    50809, 50931,   # Glucose
+    50912,          # Creatinine
+    51006,          # BUN
+    50852,          # HbA1c
+    50963,          # BNP
+    51222,          # Hemoglobin
+    50971,          # Potassium
+    50983,          # Sodium
+    51265,          # Platelets
+    51301,          # WBC
+]
+labevents_hadm = labevents[
+    labevents["ITEMID"].isin(KEY_LAB_IDS)
+][["SUBJECT_ID", "HADM_ID", "ITEMID", "VALUENUM"]].copy()
+labevents_hadm["VALUENUM"] = pd.to_numeric(
+    labevents_hadm["VALUENUM"], errors="coerce"
+)
+labevents_hadm = labevents_hadm.dropna(subset=["VALUENUM", "HADM_ID"])
+labevents_hadm.to_pickle("outputs/labevents_hadm.pkl")
+
+# Prescriptions per admission
+prescriptions.columns = prescriptions.columns.str.upper()
+prescriptions_hadm = prescriptions[
+    ["SUBJECT_ID", "HADM_ID", "DRUG"]
+].copy()
+prescriptions_hadm["DRUG"] = prescriptions_hadm["DRUG"].astype(str).str.lower()
+prescriptions_hadm.to_pickle("outputs/prescriptions_hadm.pkl")
+
+# Diagnoses per admission
+diagnoses.columns = diagnoses.columns.str.upper()
+diagnoses_hadm = diagnoses[
+    ["SUBJECT_ID", "HADM_ID", "ICD9_CODE"]
+].copy()
+diagnoses_hadm["ICD9_CODE"] = diagnoses_hadm["ICD9_CODE"].astype(str).str.strip()
+diagnoses_hadm.to_pickle("outputs/diagnoses_hadm.pkl")
+
+print("Longitudinal data saved.")
+
 print("\n" + "=" * 60)
 print("   Training Complete!")
 print("=" * 60)
